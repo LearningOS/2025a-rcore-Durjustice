@@ -23,6 +23,9 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 
+/// Maximum number of system calls supported
+const NR_SYSCALLS: usize = 512;
+
 /// The task manager, where all the tasks are managed.
 ///
 /// Functions implemented on `TaskManager` deals with all task state transitions
@@ -45,8 +48,8 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
-    /// syscall count for each app
-    syscall_count: [isize; MAX_APP_NUM],
+    /// syscall count for each system call
+    syscalls_count: [[isize; NR_SYSCALLS]; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -67,7 +70,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
-                    syscall_count: [0; MAX_APP_NUM],
+                    syscalls_count: [[0; NR_SYSCALLS]; MAX_APP_NUM],
                 })
             },
         }
@@ -140,17 +143,17 @@ impl TaskManager {
     }
 
     /// Increment syscall count for current task
-    fn increment_syscall_count(&self) {
+    fn increment_syscall_count(&self, id: usize) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.syscall_count[current] += 1;
+        inner.syscalls_count[current][id] += 1;
     }
 
     /// Get syscall count for current task
-    fn get_syscall_count(&self) -> isize {
+    fn get_syscall_count(&self, id: usize) -> isize {
         let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.syscall_count[current]
+        inner.syscalls_count[current][id]
     }
 }
 
@@ -188,11 +191,17 @@ pub fn exit_current_and_run_next() {
 }
 
 /// Increment syscall count for current task
-pub fn increment_syscall_count() {
-    TASK_MANAGER.increment_syscall_count();
+pub fn increment_syscall_count(id: usize) {
+    if id >= NR_SYSCALLS {
+        return;
+    }
+    TASK_MANAGER.increment_syscall_count(id);
 }
 
 /// Get syscall count for current task
-pub fn get_syscall_count() -> isize {
-    TASK_MANAGER.get_syscall_count()
+pub fn get_syscall_count(id: usize) -> isize {
+    if id >= NR_SYSCALLS {
+        return -1;
+    }
+    TASK_MANAGER.get_syscall_count(id)
 }

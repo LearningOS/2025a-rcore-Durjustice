@@ -45,7 +45,7 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     match _trace_request {
         0 => unsafe { (_id as *const u8).read_volatile() as isize },
         1 => unsafe { (_id as *mut u8).write_volatile(_data as u8); 0 },
-        2 => get_syscall_count(),
+        2 => get_syscall_count(_id),
         _ => -1,
     }
 }
