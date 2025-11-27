@@ -1,6 +1,6 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
-use super::{frame_alloc, FrameTracker, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -178,4 +178,59 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+fn get_pte(token: usize, va: usize) -> Option<PageTableEntry> {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(va);
+    let vpn = va.floor();
+    page_table.translate(vpn)
+}
+
+/// Safely read a value of type T from user space
+/// T must be a primitive type that can be safely read/written
+pub fn read_val<T>(token: usize, va: usize) -> Option<T>
+where
+    T: Copy,
+{
+    if let Some(pte) = get_pte(token, va) {
+        if pte.is_valid() & pte.readable() {
+            let ppn = pte.ppn();
+            let pa = VirtAddr::from(va).page_offset() | PhysAddr::from(ppn).0;
+            return Some(unsafe { *(pa as *const T) });
+        }
+    }
+    None
+}
+
+/// Safely write a value of type T to user space
+/// T must be a primitive type that can be safely read/written
+pub fn write_val<T>(token: usize, va: usize, value: T) -> bool
+where
+    T: Copy,
+{
+    if let Some(pte) = get_pte(token, va) {
+        if pte.is_valid() & pte.writable() {
+            let ppn = pte.ppn();
+            let pa = VirtAddr::from(va).page_offset() | PhysAddr::from(ppn).0;
+            unsafe { *(pa as *mut T) = value };
+            return true;
+        }
+    }
+    false
+}
+
+/// Convenience function to read a u8 from user space
+pub fn read_u8(token: usize, va: usize) -> isize {
+    read_val::<u8>(token, va).map(|v| v as isize).unwrap_or(-1)
+}
+
+/// Convenience function to write a u8 to user space
+pub fn write_u8(token: usize, va: usize, value: u8) -> isize {
+    if write_val::<u8>(token, va, value) { 0 } else { -1 }
+}
+
+/// Convenience function to write a usize to user space
+pub fn write_usize(token: usize, va: usize, value: usize) -> bool {
+    write_val::<usize>(token, va, value)
 }

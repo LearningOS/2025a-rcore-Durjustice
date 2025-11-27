@@ -14,6 +14,7 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use alloc::collections::BTreeMap;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
@@ -23,6 +24,7 @@ use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
+use crate::config::MAX_SYSCALL_NUM;
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -46,6 +48,8 @@ struct TaskManagerInner {
     tasks: Vec<TaskControlBlock>,
     /// id of current `Running` task
     current_task: usize,
+    // syscalls_count: Vec<[isize; MAX_SYSCALL_NUM]>,
+    syscalls_count: Vec<BTreeMap<usize, isize>>,
 }
 
 lazy_static! {
@@ -55,8 +59,10 @@ lazy_static! {
         let num_app = get_num_app();
         println!("num_app = {}", num_app);
         let mut tasks: Vec<TaskControlBlock> = Vec::new();
+        let mut syscalls_count = Vec::new();
         for i in 0..num_app {
             tasks.push(TaskControlBlock::new(get_app_data(i), i));
+            syscalls_count.push(BTreeMap::new());
         }
         TaskManager {
             num_app,
@@ -64,6 +70,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscalls_count,
                 })
             },
         }
@@ -153,6 +160,18 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn inc_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        *inner.syscalls_count[cur].entry(syscall_id).or_insert(0) += 1;
+    }
+
+    fn get_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.syscalls_count[cur].get(&syscall_id).copied().unwrap_or(0)
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +220,20 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increase syscall count for the current 'Running' task
+pub fn inc_syscall_count(syscall_id: usize) {
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return;
+    }
+    TASK_MANAGER.inc_syscall_count(syscall_id);
+}
+
+/// Get syscall count for the current 'Running' task
+pub fn get_syscall_count(syscall_id: usize) -> isize {
+    if syscall_id >= MAX_SYSCALL_NUM {
+        return -1;
+    }
+    TASK_MANAGER.get_syscall_count(syscall_id)
 }
