@@ -4,6 +4,9 @@ use super::{frame_alloc, FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAdd
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use crate::mm::address::VPNRange;
+use crate::mm::frame_allocator::frame_dealloc;
+use crate::task::alloc_area;
 
 bitflags! {
     /// page table entry flags
@@ -180,11 +183,40 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     v
 }
 
-fn get_pte(token: usize, va: usize) -> Option<PageTableEntry> {
+/// Map a virtual memory area
+/// 不考虑分配失败时的页回收
+pub fn map_area(token: usize, start_va: usize, len: usize, prot: usize) -> isize {
     let page_table = PageTable::from_token(token);
-    let va = VirtAddr::from(va);
-    let vpn = va.floor();
-    page_table.translate(vpn)
+    let start_vpn = VirtAddr::from(start_va).floor();
+    let end_vpn = VirtAddr::from(start_va + len).ceil();
+    for vpn in VPNRange::new(start_vpn, end_vpn) {
+        if let Some(pte) = page_table.find_pte(vpn) {
+            if pte.is_valid() {
+                return -1;
+            }
+        }
+    }
+    alloc_area(start_va, len, prot);
+    0
+}
+
+/// Unmap a virtual memory area
+/// 不考虑内存的恢复和回收
+pub fn unmap_area(token: usize, start_va: usize, len: usize) -> isize {
+    let page_table = PageTable::from_token(token);
+    let start_vpn = VirtAddr::from(start_va).floor();
+    let end_vpn = VirtAddr::from(start_va + len).ceil();
+    for vpn in VPNRange::new(start_vpn, end_vpn) {
+        if let Some(pte) = page_table.find_pte(vpn) {
+            if !pte.is_valid() {
+                return -1;
+            } else {
+                frame_dealloc(pte.ppn());
+                *pte = PageTableEntry::empty();
+            }
+        }
+    }
+    0
 }
 
 /// Safely read a value of type T from user space
@@ -193,8 +225,11 @@ pub fn read_val<T>(token: usize, va: usize) -> Option<T>
 where
     T: Copy,
 {
-    if let Some(pte) = get_pte(token, va) {
-        if pte.is_valid() & pte.readable() {
+    let page_table = PageTable::from_token(token);
+    let vpn = VirtAddr::from(va).floor();
+    let pte = page_table.find_pte(vpn);
+    if let Some(pte) = pte {
+        if pte.is_valid() & pte.readable() & (pte.flags() & PTEFlags::U != PTEFlags::empty()) {
             let ppn = pte.ppn();
             let pa = VirtAddr::from(va).page_offset() | PhysAddr::from(ppn).0;
             return Some(unsafe { *(pa as *const T) });
@@ -209,8 +244,11 @@ pub fn write_val<T>(token: usize, va: usize, value: T) -> bool
 where
     T: Copy,
 {
-    if let Some(pte) = get_pte(token, va) {
-        if pte.is_valid() & pte.writable() {
+    let page_table = PageTable::from_token(token);
+    let vpn = VirtAddr::from(va).floor();
+    let pte = page_table.find_pte(vpn);
+    if let Some(pte) = pte {
+        if pte.is_valid() & pte.writable() & (pte.flags() & PTEFlags::U != PTEFlags::empty()) {
             let ppn = pte.ppn();
             let pa = VirtAddr::from(va).page_offset() | PhysAddr::from(ppn).0;
             unsafe { *(pa as *mut T) = value };

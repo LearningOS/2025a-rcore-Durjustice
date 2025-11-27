@@ -25,6 +25,7 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 use crate::config::MAX_SYSCALL_NUM;
+use crate::mm::{MapPermission, VirtAddr};
 
 /// The task manager, where all the tasks are managed.
 ///
@@ -172,6 +173,27 @@ impl TaskManager {
         let cur = inner.current_task;
         inner.syscalls_count[cur].get(&syscall_id).copied().unwrap_or(0)
     }
+
+    fn map_perm_from_prot(prot: usize) -> MapPermission {
+        let mut perm = MapPermission::empty();
+        if prot & 0b001 != 0 {
+            perm |= MapPermission::R;
+        }
+        if prot & 0b010 != 0 {
+            perm |= MapPermission::W;
+        }
+        if prot & 0b100 != 0 {
+            perm |= MapPermission::X;
+        }
+        perm | MapPermission::U
+    }
+    fn alloc_area(&self, va: usize, len: usize, prot: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let memory_set = &mut inner.tasks[cur].memory_set;
+        let map_perm = Self::map_perm_from_prot(prot);
+        memory_set.insert_framed_area(VirtAddr::from(va), VirtAddr::from(va + len), map_perm);
+    }
 }
 
 /// Run the first task in task list.
@@ -236,4 +258,9 @@ pub fn get_syscall_count(syscall_id: usize) -> isize {
         return -1;
     }
     TASK_MANAGER.get_syscall_count(syscall_id)
+}
+
+/// Allocate a memory area for the current 'Running' task
+pub fn alloc_area(va: usize, len: usize, prot: usize) {
+    TASK_MANAGER.alloc_area(va, len, prot);
 }

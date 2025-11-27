@@ -20,6 +20,7 @@ pub use memory_set::{kernel_stack_position, MapPermission, MemorySet, KERNEL_SPA
 pub use page_table::{
     translated_byte_buffer,
     read_u8, write_u8, write_usize,
+    map_area, unmap_area,
     PageTableEntry
 };
 pub use page_table::{PTEFlags, PageTable};

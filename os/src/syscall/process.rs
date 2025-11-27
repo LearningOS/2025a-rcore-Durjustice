@@ -1,6 +1,6 @@
 //! Process management syscalls
 use crate::task::{change_program_brk, exit_current_and_run_next, get_syscall_count, suspend_current_and_run_next};
-use crate::mm::{read_u8, write_u8, write_usize};
+use crate::mm::{read_u8, write_u8, write_usize, VirtAddr, map_area, unmap_area};
 use crate::task::current_user_token;
 use crate::timer::get_time_us;
 
@@ -56,15 +56,20 @@ pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
 }
 
 // YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+pub fn sys_mmap(_start: usize, _len: usize, _prot: usize) -> isize {
+    trace!("kernel: sys_mmap");
+    if !VirtAddr::from(_start).aligned()  || _prot & 0b111 == 0 || _prot & !0b111 != 0 {
+        return -1;
+    }
+    let token = current_user_token();
+    map_area(token, _start, _len, _prot)
 }
 
 // YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+    trace!("kernel: sys_mummap");
+    let token = current_user_token();
+    unmap_area(token, _start, _len)
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
