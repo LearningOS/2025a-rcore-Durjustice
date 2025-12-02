@@ -262,5 +262,10 @@ pub fn sys_set_priority(prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority prio={}",
         current_task().unwrap().pid.0, prio
     );
-    -1
+    if prio < 2 {
+        return -1;
+    }
+    let task = current_task().unwrap();
+    task.set_priority(prio as usize);
+    prio
 }
