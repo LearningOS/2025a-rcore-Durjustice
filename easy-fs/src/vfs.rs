@@ -222,10 +222,23 @@ impl Inode {
 
     /// Add a directory entry pointing to an existing inode
     pub fn link(&self, old_name: &str, new_name: &str) -> bool {
-        let mut fs = self.fs.lock();
+        let inode_id = self.read_disk_inode(|root_inode| {
+            self.find_inode_id(old_name, root_inode)
+        });
 
-        if let Some(inode)  = self.find(old_name) {
-            let inode_id = inode.inode_id();
+        if let Some(inode_id) = inode_id {
+            let mut fs = self.fs.lock();
+            {
+                let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+                let source_inode = Arc::new(Self::new(
+                    block_id,
+                    block_offset,
+                    self.fs.clone(),
+                    self.block_device.clone(),
+                ));
+                source_inode.increase_link_count();
+            }
+            // Add new directory entry
             self.modify_disk_inode(|root_inode| {
                 // append file in dirent
                 let file_count = (root_inode.size as usize) / DIRENT_SZ;
@@ -249,31 +262,43 @@ impl Inode {
 
     /// Remove a directory entry by name
     pub fn unlink(&self, name: &str) -> bool {
-        let fs = self.fs.lock();
-
-        self.modify_disk_inode(|root_inode| {
-            assert!(root_inode.is_dir());
-            let file_count = (root_inode.size as usize) / DIRENT_SZ;
-            let mut dirent = DirEntry::empty();
-            for i in 0..file_count {
-                assert_eq!(
-                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device),
-                    DIRENT_SZ,
-                );
-                if dirent.name() == name {
-                    root_inode.write_at(DIRENT_SZ * i, DirEntry::empty().as_bytes_mut(), &self.block_device);
-                    let inode_id = dirent.inode_id() as u32;
-                    let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
-                    Arc::new(Self::new(
-                        block_id,
-                        block_offset,
-                        self.fs.clone(),
-                        self.block_device.clone(),
-                    )).decrease_link_count();
-                    return true;
+        // First find the directory entry and get inode_id without holding fs lock
+        let (found, inode_id) = {
+            self.modify_disk_inode(|root_inode| {
+                assert!(root_inode.is_dir());
+                let file_count = (root_inode.size as usize) / DIRENT_SZ;
+                let mut dirent = DirEntry::empty();
+                for i in 0..file_count {
+                    assert_eq!(
+                        root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device),
+                        DIRENT_SZ,
+                    );
+                    if dirent.name() == name {
+                        // Remove directory entry by clearing it
+                        root_inode.write_at(DIRENT_SZ * i, DirEntry::empty().as_bytes(), &self.block_device);
+                        return (true, dirent.inode_id() as u32);
+                    }
                 }
-            }
+                (false, 0)
+            })
+        };
+
+        if found {
+            // Decrease link count on the inode without holding fs lock in disk operations
+            let fs = self.fs.lock();
+            let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+            drop(fs);
+
+            Arc::new(Self::new(
+                block_id,
+                block_offset,
+                self.fs.clone(),
+                self.block_device.clone(),
+            )).decrease_link_count();
+
+            true
+        } else {
             false
-        })
+        }
     }
 }

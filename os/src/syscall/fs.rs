@@ -83,29 +83,37 @@ pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     );
 
     let task = current_task().unwrap();
-    let inner = task.inner_exclusive_access();
-    if let Some(file) = &inner.fd_table[fd] {
-        let mut stat = Stat::empty();
-        file.stat(&mut stat);
+    let file = {
+        let inner = task.inner_exclusive_access();
+        if fd >= inner.fd_table.len() {
+            return -1;
+        }
+        match inner.fd_table[fd].as_ref() {
+            Some(file) => file.clone(),
+            None => return -1,
+        }
+    }; // Release the borrow here
 
-        let dev_ptr = st as *mut u64;
-        let ino_ptr = unsafe { dev_ptr.add(1) };
-        let mode_ptr = unsafe { ino_ptr.add(1) as *mut StatMode };
-        let nlink_ptr = unsafe { mode_ptr.add(1) as *mut u32 };
+    let mut stat = Stat::empty();
+    file.stat(&mut stat);
 
-        let token = current_user_token();
-        let dev_ref = translated_refmut(token, dev_ptr);
-        let ino_ref = translated_refmut(token, ino_ptr);
-        let mode_ref = translated_refmut(token, mode_ptr);
-        let nlink_ref = translated_refmut(token, nlink_ptr);
+    // Copy Stat structure to user space
+    let dev_ptr = st as *mut u64;
+    let ino_ptr = unsafe { dev_ptr.add(1) };
+    let mode_ptr = unsafe { ino_ptr.add(1) as *mut StatMode };
+    let nlink_ptr = unsafe { mode_ptr.add(1) as *mut u32 };
 
-        *dev_ref = stat.dev;
-        *ino_ref = stat.ino;
-        *mode_ref = stat.mode;
-        *nlink_ref = stat.nlink;
-    } else {
-        return -1;
-    }
+    let token = current_user_token();
+    let dev_ref = translated_refmut(token, dev_ptr);
+    let ino_ref = translated_refmut(token, ino_ptr);
+    let mode_ref = translated_refmut(token, mode_ptr);
+    let nlink_ref = translated_refmut(token, nlink_ptr);
+
+    *dev_ref = stat.dev;
+    *ino_ref = stat.ino;
+    *mode_ref = stat.mode;
+    *nlink_ref = stat.nlink;
+
     0
 }
 
