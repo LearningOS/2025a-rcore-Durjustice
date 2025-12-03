@@ -43,6 +43,56 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    /// Check if any page in the given range is already mapped
+    pub fn is_range_mapped(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.translate(vpn) {
+                if pte.is_valid() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if all pages in the given range are mapped
+    pub fn is_range_fully_mapped(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if let Some(pte) = self.translate(vpn) {
+                if !pte.is_valid() {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Unmap all pages in the given range that start at specified VPNs
+    /// Note: This only removes entire MapAreas that start within the range
+    pub fn remove_areas_in_range(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) {
+        // Find areas to remove (those starting within our range)
+        let mut areas_to_remove = Vec::new();
+        for area in self.areas.iter() {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+
+            if area_start >= start_vpn && area_start < end_vpn {
+                // Only remove if the entire area fits within our range
+                if area_end <= end_vpn {
+                    areas_to_remove.push(area_start);
+                }
+            }
+        }
+
+        for &vpn_start in areas_to_remove.iter() {
+            self.remove_area_with_start_vpn(vpn_start);
+        }
+    }
+}
+
+impl MemorySet {
     /// Create a new empty `MemorySet`.
     pub fn new_bare() -> Self {
         Self {
@@ -438,6 +488,25 @@ bitflags! {
         const X = 1 << 3;
         ///Accessible in U mode
         const U = 1 << 4;
+    }
+}
+
+impl MapPermission {
+    /// convert from prot used in mmap/munmap syscall
+    pub fn from_prot(prot: usize) -> Self {
+        // prot bit 0 = readable, bit 1 = writable, bit 2 = executable
+        let mut map_perm = MapPermission::empty();
+        if prot & 0x1 != 0 {
+            map_perm |= MapPermission::R;
+        }
+        if prot & 0x2 != 0 {
+            map_perm |= MapPermission::W;
+        }
+        if prot & 0x4 != 0 {
+            map_perm |= MapPermission::X;
+        }
+        map_perm |= MapPermission::U;
+        map_perm
     }
 }
 

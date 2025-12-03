@@ -11,6 +11,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+const BIG_STRIDE: usize = 1 << 20;
+const DEFAULT_PRIO: usize = 16;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -71,6 +74,13 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Priority for priority scheduling
+    pub prio: usize,
+    /// Stride, not consider overflow
+    pub stride: usize,
+    /// Pass
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -135,6 +145,9 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    prio: DEFAULT_PRIO,
+                    stride: 0,
+                    pass: BIG_STRIDE / DEFAULT_PRIO,
                 })
             },
         };
@@ -165,6 +178,9 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize base_size
+        inner.base_size = user_sp;
+        // not change priority related info like fork
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -216,6 +232,9 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    prio: parent_inner.prio,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });
@@ -229,6 +248,21 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+    /// parent process spawn the child process with elf data
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+        let task_control_block = Arc::new(TaskControlBlock::new(elf_data));
+        task_control_block.inner.exclusive_access().parent = Some(Arc::downgrade(self));
+        parent_inner.children.push(task_control_block.clone());
+        task_control_block
+    }
+
+    /// set priority
+    pub fn set_priority(&self, prio: usize) {
+        let mut inner = self.inner_exclusive_access();
+        inner.prio = prio;
+        inner.pass = BIG_STRIDE / prio;
     }
 
     /// get pid of process
