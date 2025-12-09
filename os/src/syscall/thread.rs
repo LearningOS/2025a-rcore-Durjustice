@@ -110,6 +110,8 @@ pub fn sys_waittid(tid: usize) -> i32 {
         return -1;
     }
     if let Some(exit_code) = exit_code {
+        // Remove thread from deadlock detection matrices before deallocating
+        process_inner.deadlock_detect_state.remove_thread(tid);
         // dealloc the exited thread
         process_inner.tasks[tid] = None;
         exit_code

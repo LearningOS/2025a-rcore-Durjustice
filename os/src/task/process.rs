@@ -2,7 +2,7 @@
 
 use super::id::RecycleAllocator;
 use super::manager::insert_into_pid2process;
-use super::TaskControlBlock;
+use super::{current_task, TaskControlBlock};
 use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
@@ -21,6 +21,93 @@ pub struct ProcessControlBlock {
     pub pid: PidHandle,
     /// mutable
     inner: UPSafeCell<ProcessControlBlockInner>,
+}
+
+/// Resource type for deadlock detection
+pub enum ResourceType {
+    /// Mutex resource with the kernel mutex object ID
+    Mutex(usize),
+    /// Semaphore resource with the kernel semaphore object ID
+    Semaphore(usize),
+}
+
+/// Deadlock detection state using Banker's Algorithm
+pub struct DeadlockDetectState {
+    /// Whether deadlock detection is enabled
+    pub enabled: bool,
+    /// List of resource types (index j)
+    pub resource_types: Vec<ResourceType>,
+    /// Available[j]: available count for resource type j
+    pub available: Vec<isize>,
+    /// Allocation[i][j]: resources held by thread i
+    pub allocation: Vec<Vec<isize>>,
+    /// Need[i][j]: additional resources thread i may still need
+    pub need: Vec<Vec<isize>>,
+}
+
+impl DeadlockDetectState {
+    /// Create a new deadlock detection state
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            resource_types: Vec::new(),
+            available: Vec::new(),
+            allocation: Vec::new(),
+            need: Vec::new(),
+        }
+    }
+
+    /// Add threads to the deadlock detection matrices
+    pub fn add_threads(&mut self, thread_count: usize) {
+        // Ensure matrices have enough rows for this thread
+        while self.allocation.len() <= thread_count {
+            let num_resources = self.resource_types.len();
+            self.allocation.push(vec![0; num_resources]);
+            self.need.push(vec![0; num_resources]);
+        }
+    }
+
+    /// Remove a thread from the deadlock detection matrices
+    /// Releases all resources held by the thread back to available pool
+    pub fn remove_thread(&mut self, tid: usize) {
+        if tid >= self.allocation.len() || tid >= self.need.len() {
+            return;
+        }
+        // Return all allocated resources to available pool
+        for (resource_idx, allocated_count) in self.allocation[tid].iter().enumerate() {
+            self.available[resource_idx] += allocated_count;
+        }
+        for i in 0..self.resource_types.len() {
+            self.allocation[tid][i] = 0;
+            self.need[tid][i] = 0;
+        }
+    }
+
+    /// Add a new resource type to the deadlock detection matrices
+    /// Creates a new column in all matrices for the given resource
+    pub fn add_resource(&mut self, resource_type: ResourceType, count: usize) -> usize {
+        // Add new resource
+        self.resource_types.push(resource_type);
+        self.available.push(count as isize);
+        // Add new column to allocation, need, and max matrices for all threads
+        for thread_allocation in &mut self.allocation {
+            thread_allocation.push(0);
+        }
+        for thread_need in &mut self.need {
+            thread_need.push(0);
+        }
+
+        self.resource_types.len() - 1
+    }
+
+    /// Get resource index by ID and type
+    pub fn get_resource_index(&self, resource_type: &ResourceType) -> Option<usize> {
+        self.resource_types.iter().position(|r| match (r, resource_type) {
+            (ResourceType::Mutex(a), ResourceType::Mutex(b)) => a == b,
+            (ResourceType::Semaphore(a), ResourceType::Semaphore(b)) => a == b,
+            _ => false,
+        })
+    }
 }
 
 /// Inner of Process Control Block
@@ -49,6 +136,8 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// deadlock detection state
+    pub deadlock_detect_state: DeadlockDetectState,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +208,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_state: DeadlockDetectState::new(),
                 })
             },
         });
@@ -245,6 +335,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_state: DeadlockDetectState::new(),
                 })
             },
         });
@@ -282,4 +373,85 @@ impl ProcessControlBlock {
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
+
+    pub fn enable_deadlock_detect(&self, enable: usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        let state = &mut inner.deadlock_detect_state;
+        match enable {
+            0 => { state.enabled = false; true },
+            1 => { state.enabled = true; true },
+            _ => false,
+        }
+    }
+    pub fn deadlock_detected(&self, res_type: ResourceType) -> bool {
+        let inner = &mut self.inner_exclusive_access();
+        let thread_count = inner.thread_count();
+        let state = &mut inner.deadlock_detect_state;
+        state.add_threads(thread_count);
+
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+
+        // Find the resource index
+        let j = match res_type {
+            ResourceType::Mutex(mutex_id) => {
+                state.get_resource_index(&ResourceType::Mutex(mutex_id))
+            }
+            ResourceType::Semaphore(sem_id) => {
+                state.get_resource_index(&ResourceType::Semaphore(sem_id))
+            }
+        };
+
+        let j = match j {
+            Some(idx) => idx,
+            None => return false, // Resource not found, skip deadlock detection
+        };
+
+        if !state.enabled {
+            return false;
+        }
+
+        // Simulate the allocation: decrease available, increase allocation
+        let temp_available = state.available.clone();
+        let temp_allocation = state.allocation.clone();
+        let mut temp_need = state.need.clone();
+
+        // temp_available[j] -= 1;
+        // temp_allocation[tid][j] += 1;
+        temp_need[tid][j] += 1;
+
+        !is_safe_state(&temp_available, &temp_allocation, &temp_need)
+    }
+}
+
+/// Check if the system resource is in a safe state using Banker's Algorithm
+#[allow(dead_code)]
+fn is_safe_state(
+    available: &[isize],
+    allocation: &[Vec<isize>],
+    need: &[Vec<isize>],
+) -> bool {
+    let n = allocation.len(); // 线程数
+    let m = available.len();  // 资源类型数
+    let mut work = available.to_vec();
+    let mut finish = vec![false; n];
+
+    let mut safe_sequence;
+    for _ in 0..n {
+        safe_sequence = None;
+        for i in 0..n {
+            if !finish[i] && (0..m).all(|j| need[i][j] <= work[j]) {
+                // 线程 i 可完成，释放其资源
+                for j in 0..m {
+                    work[j] += allocation[i][j];
+                }
+                finish[i] = true;
+                safe_sequence = Some(i);
+                break;
+            }
+        }
+        if safe_sequence.is_none() {
+            return false; // 无安全序列
+        }
+    }
+    true // 所有线程可完成
 }
